@@ -15,6 +15,7 @@ use std::fs::File as stdFile;
 use async_std::task;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use druid::{Data,Selector,AppDelegate};
+use warp::Filter;
 
 //
 // Struct for GUI
@@ -121,7 +122,7 @@ async fn async_capture_voice(chat_id : i32) {
 
     
     // Record 10s
-    sleep(Duration::from_secs(10)).await;
+    // sleep(Duration::from_secs(10)).await;
 
     stop_recording(recording, stop_rx, shared_writer, chat_id , 0, "NULL").await;
 
@@ -131,7 +132,7 @@ async fn async_capture_voice(chat_id : i32) {
 }
 
 
-fn start_recording(recording: Arc_1f4a602b<Mutex_1f4a602b<bool>>, tx: std_mpsc_1f4a602b::Sender<bool>, writer: Arc_1f4a602b<Mutex_1f4a602b<Option<WavWriter_1f4a602b<BufWriter_1f4a602b<File_1f4a602b>>>>> ,
+async fn start_recording(recording: Arc_1f4a602b<Mutex_1f4a602b<bool>>, tx: std_mpsc_1f4a602b::Sender<bool>, writer: Arc_1f4a602b<Mutex_1f4a602b<Option<WavWriter_1f4a602b<BufWriter_1f4a602b<File_1f4a602b>>>>> ,
     chat_id: i32,                // Add chat_id parameter
     voice_recording_id: i32      // Add voice_recording_id parameter
 ) {
@@ -250,6 +251,20 @@ fn build_ui_combined() -> impl Widget<AppState> {
 //
 #[tokio::main]
 async fn main() {
+    let start_route = warp::path("start_recording")
+        .and(warp::get())
+        .and_then(handle_start_recording);
+
+    let stop_route = warp::path("stop_recording")
+        .and(warp::get())
+        .and_then(handle_stop_recording);
+
+    let routes = start_route.or(stop_route);
+
+    tokio::spawn(async move {
+        warp::serve(routes).run(([127, 0, 0, 1], 3030)).await;
+    });
+
     // let (tx, mut rx) = mpsc::channel(100);
     let main_window = WindowDesc::new(build_ui_combined())
     .title("Voice Recording - Rust Interview Task")
@@ -270,4 +285,16 @@ async fn main() {
     .delegate(Delegate {})
     .launch(initial_state)
     .expect("Failed to launch application");
+}
+
+async fn handle_start_recording() -> Result<impl warp::Reply, warp::Rejection> {
+    tokio::spawn(async {
+        async_capture_voice(1).await;
+    });
+
+    Ok(warp::reply::with_status("Recording started in background", warp::http::StatusCode::OK))
+}
+
+async fn handle_stop_recording() -> Result<impl warp::Reply, warp::Rejection> {
+    Ok(warp::reply::with_status("Recording stopped in background", warp::http::StatusCode::OK))
 }
