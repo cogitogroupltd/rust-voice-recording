@@ -82,14 +82,24 @@ impl AppDelegate<AppState> for Delegate {
     }
 }
 
+// Global stop signal
+// lazy_static::lazy_static! {
+//     static ref STOP_SIGNAL: Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>> = Arc::new(Mutex::new(None));
+// }
 
+lazy_static::lazy_static! {
+    static ref STOP_SIGNAL: Arc<Mutex<Option<tokio::sync::watch::Sender<bool>>>> = Arc::new(Mutex::new(None));
+}
 
 
 // Function to start recording audio
 async fn async_capture_voice(chat_id : i32) {
+    println!("Started Stopping recording");
     let (tx, rx) = std_mpsc_1f4a602b::channel::<bool>();
-    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
-    
+    // let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let (stop_tx,mut stop_rx) = tokio::sync::watch::channel(false);
+    println!("stop_tx value: {:?}", stop_tx);
+    *STOP_SIGNAL.lock().unwrap() = Some(stop_tx);
     let recording = Arc_1f4a602b::new(Mutex_1f4a602b::new(false));
     let host = cpal::default_host();
     let device = host.default_input_device().expect("No input device available");
@@ -116,15 +126,23 @@ async fn async_capture_voice(chat_id : i32) {
     let writer_clone = shared_writer.clone();
     
     
-    spawn_1f4a602b(move || {
-        start_recording(recording_clone, tx, writer_clone, chat_id ,0);
+    // spawn_1f4a602b(move || {
+    //     start_recording(recording_clone, tx, writer_clone, chat_id ,0);
+    // });
+    tokio::spawn(async move {
+        start_recording(recording_clone, tx, writer_clone, chat_id, 0);
     });
 
     
     // Record 10s
+    // stop_rx.await.ok();
+    while !*stop_rx.borrow() {
+        stop_rx.changed().await.unwrap();
+    }
     // sleep(Duration::from_secs(10)).await;
 
-    stop_recording(recording, stop_rx, shared_writer, chat_id , 0, "NULL").await;
+    println!("Stopping recording");
+    stop_recording(recording, shared_writer, chat_id , 0, "NULL").await;
 
     // Abort the server after recording
 
@@ -132,7 +150,7 @@ async fn async_capture_voice(chat_id : i32) {
 }
 
 
-async fn start_recording(recording: Arc_1f4a602b<Mutex_1f4a602b<bool>>, tx: std_mpsc_1f4a602b::Sender<bool>, writer: Arc_1f4a602b<Mutex_1f4a602b<Option<WavWriter_1f4a602b<BufWriter_1f4a602b<File_1f4a602b>>>>> ,
+fn start_recording(recording: Arc_1f4a602b<Mutex_1f4a602b<bool>>, tx: std::sync::mpsc::Sender<bool>, writer: Arc<Mutex<Option<hound::WavWriter<std::io::BufWriter<std::fs::File>>>>>,
     chat_id: i32,                // Add chat_id parameter
     voice_recording_id: i32      // Add voice_recording_id parameter
 ) {
@@ -187,7 +205,6 @@ async fn start_recording(recording: Arc_1f4a602b<Mutex_1f4a602b<bool>>, tx: std_
 
 async fn stop_recording(
     recording: Arc<Mutex<bool>>, 
-    rx: tokio::sync::oneshot::Receiver<()>,
     writer: Arc_1f4a602b<Mutex_1f4a602b<Option<WavWriter_1f4a602b<BufWriter_1f4a602b<File_1f4a602b>>>>>,
     chat_id: i32,
     voice_recording_id: i32,
@@ -197,8 +214,6 @@ async fn stop_recording(
 
     finalize_wav_file(writer.clone()).expect("Failed to finalize WAV file");
     println!("Recording stopped and file finalized.");
-
-
     }
 
 fn finalize_wav_file(writer: Arc_1f4a602b<Mutex_1f4a602b<Option<WavWriter_1f4a602b<BufWriter_1f4a602b<File_1f4a602b>>>>>) -> Result<(), hound_1f4a602b::Error> {
@@ -215,6 +230,24 @@ fn finalize_wav_file(writer: Arc_1f4a602b<Mutex_1f4a602b<Option<WavWriter_1f4a60
 }
 
 
+// HTTP Handlers
+async fn handle_start_recording() -> Result<impl warp::Reply, warp::Rejection> {
+    tokio::spawn(async {
+        async_capture_voice(1).await;
+    });
+    Ok(warp::reply::with_status("Recording started in background", warp::http::StatusCode::OK))
+}
+
+async fn handle_stop_recording() -> Result<impl warp::Reply, warp::Rejection> {
+    if let Some(stop_tx) = STOP_SIGNAL.lock().unwrap().take() {
+        let _ = stop_tx.send(true);
+    }
+    // Send a stop signal to the recording task
+    // This is a placeholder; you need to implement the actual stop mechanism
+    Ok(warp::reply::with_status("Recording stopped in background", warp::http::StatusCode::OK))
+}
+
+
 
 // UI Components
 // 
@@ -226,13 +259,16 @@ fn build_ui_combined() -> impl Widget<AppState> {
         let start_rec = Button::new("Start").on_click(|_ctx, data: &mut AppState, _env| {
             // Parse chat_id from the AppState instance
             let chat_id_int = 1;
-            task::block_on(async_capture_voice(chat_id_int));
+            // task::block_on(async_capture_voice(chat_id_int));
+            tokio::spawn(async_capture_voice(chat_id_int));
         });
 
         let stop_rec = Button::new("Stop").on_click(|_ctx, data: &mut AppState, _env| {
             // Parse chat_id from the AppState instance
             let chat_id_int = 1;
-            
+            if let Some(stop_tx) = STOP_SIGNAL.lock().unwrap().take() {
+                let _ = stop_tx.send(true);
+            }
         });
 
     // Layout with elements
@@ -251,20 +287,6 @@ fn build_ui_combined() -> impl Widget<AppState> {
 //
 #[tokio::main]
 async fn main() {
-    let start_route = warp::path("start_recording")
-        .and(warp::get())
-        .and_then(handle_start_recording);
-
-    let stop_route = warp::path("stop_recording")
-        .and(warp::get())
-        .and_then(handle_stop_recording);
-
-    let routes = start_route.or(stop_route);
-
-    tokio::spawn(async move {
-        warp::serve(routes).run(([127, 0, 0, 1], 3030)).await;
-    });
-
     // let (tx, mut rx) = mpsc::channel(100);
     let main_window = WindowDesc::new(build_ui_combined())
     .title("Voice Recording - Rust Interview Task")
@@ -281,20 +303,20 @@ async fn main() {
         chat_id: "1".to_string(),
     };
 
+    // Launch the web server
+    let routes = warp::path("start_recording")
+        .and(warp::get())
+        .and_then(handle_start_recording)
+        .or(warp::path("stop_recording")
+            .and(warp::get())
+            .and_then(handle_stop_recording));
+
+    tokio::spawn(async move {
+        warp::serve(routes).run(([127, 0, 0, 1], 3030)).await;
+    });
+
     launcher
     .delegate(Delegate {})
     .launch(initial_state)
     .expect("Failed to launch application");
-}
-
-async fn handle_start_recording() -> Result<impl warp::Reply, warp::Rejection> {
-    tokio::spawn(async {
-        async_capture_voice(1).await;
-    });
-
-    Ok(warp::reply::with_status("Recording started in background", warp::http::StatusCode::OK))
-}
-
-async fn handle_stop_recording() -> Result<impl warp::Reply, warp::Rejection> {
-    Ok(warp::reply::with_status("Recording stopped in background", warp::http::StatusCode::OK))
 }
